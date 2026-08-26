@@ -1,5 +1,6 @@
-// AI fit scoring rubric and response validation.
-// The structured 0-100 rubric used to score jobs against Richard's profile.
+// AI fit scoring rubric and deterministic score calculation.
+// The model returns components + penalties only; the server calculates
+// total_score and recommendation deterministically.
 
 import { z } from 'zod';
 
@@ -13,12 +14,15 @@ export const componentScoresSchema = z.object({
   location: z.number().min(0).max(5),
 });
 
+export const penaltyEntrySchema = z.object({
+  reason: z.string(),
+  points: z.number().negative(),
+});
+
 export const scoreResponseSchema = z.object({
-  score: z.number().min(0).max(100),
-  recommendation: z.enum(['APPLY_NOW', 'STRONG_REVIEW', 'WATCH', 'IGNORE']),
   confidence: z.enum(['HIGH', 'MEDIUM', 'LOW']),
   components: componentScoresSchema,
-  penalties: z.array(z.string()).default([]),
+  penalties: z.array(penaltyEntrySchema).default([]),
   why_this_fits: z.array(z.string()).default([]),
   strongest_resume_evidence: z.array(z.string()).default([]),
   gaps: z.array(z.string()).default([]),
@@ -27,6 +31,30 @@ export const scoreResponseSchema = z.object({
 
 export type ScoreResponse = z.infer<typeof scoreResponseSchema>;
 export type ComponentScores = z.infer<typeof componentScoresSchema>;
+export type PenaltyEntry = z.infer<typeof penaltyEntrySchema>;
+
+// ---- Deterministic score calculation ----
+
+export function calculateTotalScore(components: ComponentScores, penalties: PenaltyEntry[]): number {
+  const componentSum =
+    components.production_operations +
+    components.ai_workflow +
+    components.media_domain +
+    components.leadership +
+    components.transferability +
+    components.seniority +
+    components.location;
+  const penaltyTotal = penalties.reduce((sum, p) => sum + p.points, 0);
+  return Math.max(0, Math.min(100, componentSum + penaltyTotal));
+}
+
+export function recommendationForScore(score: number): string {
+  if (score >= 90) return 'EXCEPTIONAL';
+  if (score >= 82) return 'APPLY_NOW';
+  if (score >= 75) return 'STRONG_REVIEW';
+  if (score >= 65) return 'WATCH';
+  return 'IGNORE';
+}
 
 export const SCORING_RUBRIC = `
 SCORING RUBRIC (0-100 total)
@@ -40,7 +68,7 @@ Components:
 - SENIORITY MATCH: 0-10
 - LOCATION / WORK ARRANGEMENT: 0-5
 
-Penalties (applied to total, can push below thresholds):
+Penalties (each is a negative integer subtracted from the component sum):
 - Professional software-engineering requirement: -20 to -35
 - ML research / ML engineering: -25 to -40
 - Mandatory specialized CS background: -15 to -30
@@ -48,13 +76,18 @@ Penalties (applied to total, can push below thresholds):
 - Accounting-specialist role: -20
 - HR/recruiting specialist: -20
 - Entry-level role: -20 to -35
+- VFX/animation pipeline engineering: -15 to -25 (distinct from production operations)
+- QA/testing as primary discipline: -15 to -25 (distinct from production operations)
+- Creative craft direction (art/design) as primary discipline: -10 to -20
+- Seasonal/temporary roles: -5 to -10
 
 IMPORTANT RULES:
 - Do NOT describe Richard as: software engineer, ML engineer, data scientist, computer scientist, full-stack engineer, enterprise salesperson, quota-carrying salesperson, attorney, CPA, or HR specialist.
 - Never fabricate qualifications.
 - A strange title with excellent semantic fit should score higher than a familiar title with poor responsibilities.
 - Distinguish "could learn the tool" from "lacks the underlying professional discipline." Do not penalize merely because a posting mentions unfamiliar software.
-- Location is a modest score component unless the role clearly requires incompatible on-site presence.
+- Location is a modest score component (0-5) once the geography gate has passed. Do not double-penalize location.
+- If no job description is available, set confidence to LOW.
 `;
 
 export const CANDIDATE_PROFILE_FOR_SCORING = `

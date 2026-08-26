@@ -1,7 +1,10 @@
-// Job Radar — AI Scoring Edge Function (v2.1: tightened geography + role gates)
+// Job Radar — AI Scoring Edge Function (v3.1: deterministic scoring + description enrichment)
 // Scores unscored jobs against Richard's candidate profile using a structured
 // 0-100 rubric. Runs a deterministic prefilter first, then calls the AI model
-// only for relevant jobs. Validates all model output.
+// only for relevant jobs. The model returns components + penalties only;
+// the SERVER calculates total_score and recommendation deterministically.
+// For jobs passing prefilter with no description, fetches full posting detail
+// from the ATS before scoring.
 
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
 
@@ -51,10 +54,10 @@ function evaluateGeography(locationText: string | null): { state: 'PASS' | 'FAIL
   const lower = locationText.toLowerCase();
 
   for (const city of LA_AREA_CITIES) {
-    if (lower.includes(city)) return { state: 'PASS', reason: `LA-area location: "${city}"` };
+    if (lower.includes(city)) return { state: 'PASS', reason: 'LA-area location: "' + city + '"' };
   }
   for (const pattern of REMOTE_PATTERNS) {
-    if (lower.includes(pattern)) return { state: 'PASS', reason: `Remote-US accepted: "${pattern}"` };
+    if (lower.includes(pattern)) return { state: 'PASS', reason: 'Remote-US accepted: "' + pattern + '"' };
   }
   if (lower.includes('california') && lower.includes('remote')) {
     return { state: 'PASS', reason: 'California Remote accepted' };
@@ -64,7 +67,7 @@ function evaluateGeography(locationText: string | null): { state: 'PASS' | 'FAIL
       if (lower.includes('remote') || LA_AREA_CITIES.some((c) => lower.includes(c))) {
         return { state: 'PASS', reason: 'Multi-location includes acceptable site' };
       }
-      return { state: 'FAIL', reason: `Location is non-LA/non-remote: "${city}"` };
+      return { state: 'FAIL', reason: 'Location is non-LA/non-remote: "' + city + '"' };
     }
   }
   for (const indicator of NON_US_INDICATORS) {
@@ -72,7 +75,7 @@ function evaluateGeography(locationText: string | null): { state: 'PASS' | 'FAIL
       if (lower.includes('remote') || LA_AREA_CITIES.some((c) => lower.includes(c))) {
         return { state: 'PASS', reason: 'Multi-location includes acceptable site' };
       }
-      return { state: 'FAIL', reason: `Non-US location: "${indicator}"` };
+      return { state: 'FAIL', reason: 'Non-US location: "' + indicator + '"' };
     }
   }
   if (
@@ -147,7 +150,7 @@ interface PrefilterResult {
 }
 
 function prefilterJob(title: string, locationText: string | null, description: string | null): PrefilterResult {
-  const text = `${title}\n${description ?? ''}`;
+  const text = title + '\n' + (description ?? '');
   const lower = text.toLowerCase();
 
   const geo = evaluateGeography(locationText);
@@ -186,92 +189,186 @@ function prefilterJob(title: string, locationText: string | null, description: s
   const reasons: string[] = [];
 
   if (geo.state === 'FAIL') {
-    reasons.push(`Geography FAIL: ${geo.reason}`);
+    reasons.push('Geography FAIL: ' + geo.reason);
     return { relevant: false, geography: geo.state, roleStrength, positiveHits, negativeHits, juniorPenalty, reason: reasons.join('; ') };
   }
   if (hasStrongExclusion) {
-    reasons.push(`Discipline exclusion: ${negativeHits.join(', ')}`);
-    if (geo.state !== 'UNKNOWN') reasons.push(`Geography: ${geo.state}`);
+    reasons.push('Discipline exclusion: ' + negativeHits.join(', '));
+    if (geo.state !== 'UNKNOWN') reasons.push('Geography: ' + geo.state);
     return { relevant: false, geography: geo.state, roleStrength, positiveHits, negativeHits, juniorPenalty, reason: reasons.join('; ') };
   }
   if (juniorPenalty && roleStrength === 'WEAK') {
     reasons.push('Junior/coordinator/assistant title with no strong role match');
-    if (geo.state !== 'UNKNOWN') reasons.push(`Geography: ${geo.state}`);
+    if (geo.state !== 'UNKNOWN') reasons.push('Geography: ' + geo.state);
     return { relevant: false, geography: geo.state, roleStrength, positiveHits, negativeHits, juniorPenalty, reason: reasons.join('; ') };
   }
   if (roleStrength === 'WEAK') {
     const hasOnlyGeneric = GENERIC_WORDS.some((g) => lower.includes(g));
     reasons.push(hasOnlyGeneric ? 'Generic keywords only — no strong role concept matched' : 'No relevant role concepts matched');
-    if (geo.state !== 'UNKNOWN') reasons.push(`Geography: ${geo.state}`);
+    if (geo.state !== 'UNKNOWN') reasons.push('Geography: ' + geo.state);
     return { relevant: false, geography: geo.state, roleStrength, positiveHits, negativeHits, juniorPenalty, reason: reasons.join('; ') };
   }
 
-  reasons.push(`Role: ${roleStrength}`);
-  reasons.push(`Positive: ${positiveHits.join(', ') || 'none'}`);
-  if (negativeHits.length > 0) reasons.push(`Negative: ${negativeHits.join(', ')}`);
-  reasons.push(`Geography: ${geo.state}${geo.reason ? ' (' + geo.reason + ')' : ''}`);
+  reasons.push('Role: ' + roleStrength);
+  reasons.push('Positive: ' + (positiveHits.join(', ') || 'none'));
+  if (negativeHits.length > 0) reasons.push('Negative: ' + negativeHits.join(', '));
+  reasons.push('Geography: ' + geo.state + (geo.reason ? ' (' + geo.reason + ')' : ''));
   if (juniorPenalty) reasons.push('Junior title — retained due to strong match');
 
   return { relevant: true, geography: geo.state, roleStrength, positiveHits, negativeHits, juniorPenalty, reason: reasons.join('; ') };
 }
 
-// ---- Scoring rubric ----
+// ---- Scoring rubric and candidate profile (string constants, no template literals) ----
 
-const CANDIDATE_PROFILE = `
-CANDIDATE: Richard Kuhne
-LOCATION: Los Angeles, California
-POSITIONING: PRODUCTION OPERATIONS / AI SYSTEMS / WORKFLOW AUTOMATION
+const CANDIDATE_PROFILE = [
+  'CANDIDATE: Richard Kuhne',
+  'LOCATION: Los Angeles, California',
+  'POSITIONING: PRODUCTION OPERATIONS / AI SYSTEMS / WORKFLOW AUTOMATION',
+  '',
+  'Richard is an experienced production executive, line producer and production manager with extensive unscripted television, digital and branded-content experience, now combining that production-operating background with hands-on AI systems design, agentic workflows, workflow automation and independent digital-product development.',
+  '',
+  'PRODUCTION EXPERIENCE: production operations, line producing, production management, budgeting, cost tracking, scheduling, crew management, vendor management, production logistics, locations, travel, permits, insurance, payroll preparation, contracts, cross-department coordination, simultaneous productions, production problem solving, vendor negotiation, delivery coordination, legal/accounting/HR coordination.',
+  '',
+  'AI/SYSTEMS EXPERIENCE: agentic workflow design, AI-assisted development, structured skills and SOPs, API integrations, MCP integrations, human-in-the-loop systems, AI workflow architecture, multi-model workflows, AI-assisted research, operational decision support, source-backed reasoning, information normalization, exception detection.',
+  '',
+  'MEDIA/PRODUCT EXPERIENCE: unscripted television, digital content, branded content, AI-assisted production, research systems, digital publishing, audience development, emerging media.',
+  '',
+  'PROOF PROJECTS: FIELDPLAN (agentic production-operations prototype), PDUFA PULSE (AI-assisted biotech intelligence publication), THE PICKUP (entertainment intelligence product).',
+  '',
+  'PREVIOUS: NBCUniversal Digital Lab (Line Producer, Staff Production Manager), freelance across HGTV, TLC, PBS, Discovery.',
+  '',
+  'TARGET ROLE FAMILIES: AI+Production/Media Operations, Production/Content Operations, Media/Creative Technology, Product/Program/Operations.',
+  '',
+  'NEVER DESCRIBE RICHARD AS: software engineer, ML engineer, data scientist, computer scientist, full-stack engineer, enterprise salesperson, quota-carrying salesperson, attorney, CPA, HR specialist. NEVER FABRICATE QUALIFICATIONS.',
+].join('\n');
 
-Richard is an experienced production executive, line producer and production manager with extensive unscripted television, digital and branded-content experience, now combining that production-operating background with hands-on AI systems design, agentic workflows, workflow automation and independent digital-product development.
+const SCORING_RUBRIC = [
+  'SCORING RUBRIC (0-100 total):',
+  '- PRODUCTION/OPERATIONS MATCH: 0-25',
+  '- AI/WORKFLOW TRANSFORMATION MATCH: 0-20',
+  '- MEDIA/ENTERTAINMENT DOMAIN MATCH: 0-15',
+  '- LEADERSHIP/CROSS-FUNCTIONAL MATCH: 0-15',
+  '- EXPERIENCE TRANSFERABILITY: 0-10',
+  '- SENIORITY MATCH: 0-10',
+  '- LOCATION/WORK ARRANGEMENT: 0-5',
+  '',
+  'PENALTIES (subtract from total):',
+  '- Software-engineering requirement: -20 to -35',
+  '- ML research/engineering: -25 to -40',
+  '- Mandatory specialized CS background: -15 to -30',
+  '- Quota-carrying enterprise sales: -20 to -35',
+  '- Accounting-specialist: -20',
+  '- HR/recruiting specialist: -20',
+  '- Entry-level: -20 to -35',
+  '- VFX/animation pipeline engineering: -15 to -25 (distinct from production operations)',
+  '- QA/testing as primary discipline: -15 to -25 (distinct from production operations)',
+  '- Creative craft direction (art/design) as primary discipline: -10 to -20',
+  '- Seasonal/temporary roles: -5 to -10',
+  '',
+  'CALIBRATION RULES:',
+  '- Distinguish underlying professional discipline from surface keyword overlap.',
+  '- Penalize technical disciplines requiring substantial engineering/VFX pipeline expertise the candidate does not possess.',
+  '- Penalize QA/testing disciplines unrelated to production operations.',
+  '- Penalize creative-direction roles whose primary requirement is creative craft rather than operations management.',
+  '- Penalize junior/assistant/seasonal roles heavily.',
+  '- Do NOT penalize a strange title merely because it is unfamiliar if the actual responsibilities strongly match production operations, workflow transformation, cross-functional program management, or AI-enabled media operations.',
+  '- Location is secondary and should carry modest weight (0-5) once the geography gate has already passed. Do not double-penalize location.',
+  '- NEVER fabricate candidate experience. Only reference skills and experience listed in the candidate profile. If a job requires experience the candidate does not have, name it as a gap.',
+].join('\n');
 
-PRODUCTION EXPERIENCE: production operations, line producing, production management, budgeting, cost tracking, scheduling, crew management, vendor management, production logistics, locations, travel, permits, insurance, payroll preparation, contracts, cross-department coordination, simultaneous productions, production problem solving, vendor negotiation, delivery coordination, legal/accounting/HR coordination.
+const SYSTEM_PROMPT_TEMPLATE = [
+  'You are an expert career analyst evaluating job postings for fit against a specific candidate.',
+  SCORING_RUBRIC,
+  '',
+  CANDIDATE_PROFILE,
+  '',
+  'Respond with ONLY a JSON object in this exact shape:',
+  '{',
+  '  "confidence": "HIGH" | "MEDIUM" | "LOW",',
+  '  "components": {',
+  '    "production_operations": 0-25,',
+  '    "ai_workflow": 0-20,',
+  '    "media_domain": 0-15,',
+  '    "leadership": 0-15,',
+  '    "transferability": 0-10,',
+  '    "seniority": 0-10,',
+  '    "location": 0-5',
+  '  },',
+  '  "penalties": [',
+  '    { "reason": "string", "points": negative-integer }',
+  '  ],',
+  '  "why_this_fits": ["string"],',
+  '  "strongest_resume_evidence": ["string"],',
+  '  "gaps": ["string"],',
+  '  "hiring_manager_thesis": "string"',
+  '}',
+  '',
+  'Do NOT include "score" or "recommendation" in your response. The server will calculate total_score and recommendation deterministically from your components and penalties. The total is the sum of all component values plus all penalty points (penalties are negative), clamped to 0-100. If no description text is available, set confidence to LOW.',
+].join('\n');
 
-AI/SYSTEMS EXPERIENCE: agentic workflow design, AI-assisted development, structured skills and SOPs, API integrations, MCP integrations, human-in-the-loop systems, AI workflow architecture, multi-model workflows, AI-assisted research, operational decision support, source-backed reasoning, information normalization, exception detection.
+// ---- Description enrichment for shortlisted jobs ----
 
-MEDIA/PRODUCT EXPERIENCE: unscripted television, digital content, branded content, AI-assisted production, research systems, digital publishing, audience development, emerging media.
+async function enrichJobDescription(
+  source: string,
+  sourceJobId: string,
+  atsIdentifier: string | null,
+  jobUrl: string | null
+): Promise<{ description_text: string | null; description_html: string | null }> {
+  try {
+    if (source === 'greenhouse' && atsIdentifier) {
+      const url = 'https://boards-api.greenhouse.io/v1/boards/' + atsIdentifier + '/jobs/' + sourceJobId;
+      const resp = await fetch(url, { headers: { Accept: 'application/json' } });
+      if (!resp.ok) return { description_text: null, description_html: null };
+      const data = await resp.json();
+      const content = data.content ?? null;
+      return {
+        description_text: content ? stripHtml(content) : null,
+        description_html: content ?? null,
+      };
+    }
 
-PROOF PROJECTS: FIELDPLAN (agentic production-operations prototype), PDUFA PULSE (AI-assisted biotech intelligence publication), THE PICKUP (entertainment intelligence product).
+    if (source === 'smartrecruiters' && atsIdentifier) {
+      const url = 'https://api.smartrecruiters.com/v1/companies/' + atsIdentifier + '/postings/' + sourceJobId;
+      const resp = await fetch(url, { headers: { Accept: 'application/json' } });
+      if (!resp.ok) return { description_text: null, description_html: null };
+      const data = await resp.json();
+      const jobAd = data.jobAd ?? null;
+      if (jobAd) {
+        const sections = jobAd.sections ?? {};
+        const parts: string[] = [];
+        for (const key of Object.keys(sections)) {
+          const section = sections[key];
+          if (section?.text) parts.push(section.text);
+          else if (section?.title && section?.value) parts.push(section.title + ': ' + section.value);
+        }
+        const text = parts.join('\n\n') || null;
+        return {
+          description_text: text,
+          description_html: jobAd.html ?? null,
+        };
+      }
+      return { description_text: null, description_html: null };
+    }
 
-PREVIOUS: NBCUniversal Digital Lab (Line Producer, Staff Production Manager), freelance across HGTV, TLC, PBS, Discovery.
+    // Lever and Ashby already return descriptions in the list endpoint
+    return { description_text: null, description_html: null };
+  } catch {
+    return { description_text: null, description_html: null };
+  }
+}
 
-TARGET ROLE FAMILIES: AI+Production/Media Operations, Production/Content Operations, Media/Creative Technology, Product/Program/Operations.
-
-NEVER DESCRIBE RICHARD AS: software engineer, ML engineer, data scientist, computer scientist, full-stack engineer, enterprise salesperson, quota-carrying salesperson, attorney, CPA, HR specialist. NEVER FABRICATE QUALIFICATIONS.
-`;
-
-const SCORING_RUBRIC = `
-SCORING RUBRIC (0-100 total):
-- PRODUCTION/OPERATIONS MATCH: 0-25
-- AI/WORKFLOW TRANSFORMATION MATCH: 0-20
-- MEDIA/ENTERTAINMENT DOMAIN MATCH: 0-15
-- LEADERSHIP/CROSS-FUNCTIONAL MATCH: 0-15
-- EXPERIENCE TRANSFERABILITY: 0-10
-- SENIORITY MATCH: 0-10
-- LOCATION/WORK ARRANGEMENT: 0-5
-
-PENALTIES (subtract from total):
-- Software-engineering requirement: -20 to -35
-- ML research/engineering: -25 to -40
-- Mandatory specialized CS background: -15 to -30
-- Quota-carrying enterprise sales: -20 to -35
-- Accounting-specialist: -20
-- HR/recruiting specialist: -20
-- Entry-level: -20 to -35
-- VFX/animation pipeline engineering: -15 to -25 (distinct from production operations)
-- QA/testing as primary discipline: -15 to -25 (distinct from production operations)
-- Creative craft direction (art/design) as primary discipline: -10 to -20
-- Seasonal/temporary roles: -5 to -10
-
-CALIBRATION RULES:
-- Distinguish underlying professional discipline from surface keyword overlap. A title containing "operations" or "production" does not automatically qualify if the day-to-day work is in a different discipline (VFX pipeline engineering, QA testing, art direction).
-- Penalize technical disciplines requiring substantial engineering/VFX pipeline expertise the candidate does not possess.
-- Penalize QA/testing disciplines unrelated to production operations.
-- Penalize creative-direction roles whose primary requirement is creative craft rather than operations management.
-- Penalize junior/assistant/seasonal roles heavily.
-- Do NOT penalize a strange title merely because it is unfamiliar if the actual responsibilities strongly match production operations, workflow transformation, cross-functional program management, or AI-enabled media operations.
-- Location is secondary and should carry modest weight (0-5) once the geography gate has already passed. Do not double-penalize location.
-- NEVER fabricate candidate experience. Only reference skills and experience listed in the candidate profile. If a job requires experience the candidate does not have, name it as a gap.
-`;
+function stripHtml(html: string): string {
+  return html
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
 // ---- Model provider abstraction (OpenAI implementation) ----
 
@@ -297,13 +394,13 @@ function getModelProvider(): ModelProvider | null {
 
       const resp = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + apiKey },
         body: JSON.stringify(body),
       });
 
       if (!resp.ok) {
         const errText = await resp.text();
-        throw new Error(`Model API error ${resp.status}: ${errText}`);
+        throw new Error('Model API error ' + resp.status + ': ' + errText);
       }
 
       const data = await resp.json();
@@ -314,9 +411,12 @@ function getModelProvider(): ModelProvider | null {
 
 // ---- Response validation ----
 
+interface PenaltyEntry {
+  reason: string;
+  points: number;
+}
+
 interface ScoreResponse {
-  score: number;
-  recommendation: string;
   confidence: string;
   components: {
     production_operations: number;
@@ -327,22 +427,39 @@ interface ScoreResponse {
     seniority: number;
     location: number;
   };
-  penalties: string[];
+  penalties: PenaltyEntry[];
   why_this_fits: string[];
   strongest_resume_evidence: string[];
   gaps: string[];
   hiring_manager_thesis: string;
 }
 
+// ---- Deterministic score calculation (server-side, not model-controlled) ----
+
+function calculateTotalScore(components: ScoreResponse['components'], penalties: PenaltyEntry[]): number {
+  const componentSum =
+    components.production_operations +
+    components.ai_workflow +
+    components.media_domain +
+    components.leadership +
+    components.transferability +
+    components.seniority +
+    components.location;
+  const penaltyTotal = penalties.reduce((sum, p) => sum + p.points, 0);
+  return clamp(componentSum + penaltyTotal, 0, 100);
+}
+
+function recommendationForScore(score: number): string {
+  if (score >= 90) return 'EXCEPTIONAL';
+  if (score >= 82) return 'APPLY_NOW';
+  if (score >= 75) return 'STRONG_REVIEW';
+  if (score >= 65) return 'WATCH';
+  return 'IGNORE';
+}
+
 function validateScoreResponse(raw: unknown): ScoreResponse | null {
   if (typeof raw !== 'object' || raw === null) return null;
   const obj = raw as Record<string, unknown>;
-
-  const score = Number(obj.score);
-  if (isNaN(score) || score < 0 || score > 100) return null;
-
-  const recommendation = String(obj.recommendation ?? '');
-  if (!['APPLY_NOW', 'STRONG_REVIEW', 'WATCH', 'IGNORE'].includes(recommendation)) return null;
 
   const confidence = String(obj.confidence ?? '');
   if (!['HIGH', 'MEDIUM', 'LOW'].includes(confidence)) return null;
@@ -360,12 +477,24 @@ function validateScoreResponse(raw: unknown): ScoreResponse | null {
     location: clamp(Number(comp.location ?? 0), 0, 5),
   };
 
+  const rawPenalties = obj.penalties;
+  const penalties: PenaltyEntry[] = [];
+  if (Array.isArray(rawPenalties)) {
+    for (const p of rawPenalties) {
+      if (typeof p === 'object' && p !== null) {
+        const reason = String((p as Record<string, unknown>).reason ?? '');
+        const points = Number((p as Record<string, unknown>).points ?? 0);
+        if (reason && !isNaN(points) && points <= 0) {
+          penalties.push({ reason, points });
+        }
+      }
+    }
+  }
+
   return {
-    score,
-    recommendation,
     confidence,
     components,
-    penalties: Array.isArray(obj.penalties) ? obj.penalties.map(String) : [],
+    penalties,
     why_this_fits: Array.isArray(obj.why_this_fits) ? obj.why_this_fits.map(String) : [],
     strongest_resume_evidence: Array.isArray(obj.strongest_resume_evidence) ? obj.strongest_resume_evidence.map(String) : [],
     gaps: Array.isArray(obj.gaps) ? obj.gaps.map(String) : [],
@@ -402,7 +531,6 @@ Deno.serve(async (req: Request) => {
   try {
     const provider = getModelProvider();
 
-    // Load unscored jobs (status = 'new')
     const { data: jobs, error: jobsError } = await supabase
       .from('jobs')
       .select('*, companies(name, priority)')
@@ -430,7 +558,6 @@ Deno.serve(async (req: Request) => {
     const failures: Array<{ job: string; error: string }> = [];
 
     for (const job of jobs) {
-      // Run prefilter with structured geography + role gate
       const prefilter = prefilterJob(job.title, job.location_text, job.description_text);
       if (!prefilter.relevant) {
         await supabase.from('jobs').update({ status: 'filtered' }).eq('id', job.id);
@@ -438,60 +565,68 @@ Deno.serve(async (req: Request) => {
         continue;
       }
 
-      // If no model provider, mark as 'prefiltered' and continue to next job
-      // — do NOT stop the loop, so all jobs get filtered even without AI
       if (!provider) {
         await supabase.from('jobs').update({ status: 'prefiltered' }).eq('id', job.id);
         scored++;
         continue;
       }
 
+      // Enrich description for jobs that passed prefilter but have no description
+      let jobDescription = job.description_text;
+      let enrichmentFailed = false;
+      if ((!jobDescription || jobDescription.trim() === '') && job.source && job.source_job_id) {
+        const { data: companyData } = await supabase
+          .from('companies')
+          .select('ats_type, ats_identifier')
+          .eq('id', job.company_id)
+          .single();
+
+        if (companyData?.ats_identifier) {
+          const enriched = await enrichJobDescription(
+            job.source,
+            job.source_job_id,
+            companyData.ats_identifier,
+            job.job_url,
+          );
+          if (enriched.description_text) {
+            jobDescription = enriched.description_text;
+            await supabase
+              .from('jobs')
+              .update({
+                description_text: enriched.description_text,
+                description_html: enriched.description_html,
+              })
+              .eq('id', job.id);
+          } else {
+            enrichmentFailed = true;
+          }
+        } else {
+          enrichmentFailed = true;
+        }
+      }
+
       try {
-        const systemPrompt = `You are an expert career analyst evaluating job postings for fit against a specific candidate. ${SCORING_RUBRIC}
-
-${CANDIDATE_PROFILE}
-
-Respond with ONLY a JSON object in this exact shape:
-{
-  "score": <number 0-100>,
-  "recommendation": "APPLY_NOW" | "STRONG_REVIEW" | "WATCH" | "IGNORE",
-  "confidence": "HIGH" | "MEDIUM" | "LOW",
-  "components": {
-    "production_operations": <0-25>,
-    "ai_workflow": <0-20>,
-    "media_domain": <0-15>,
-    "leadership": <0-15>,
-    "transferability": <0-10>,
-    "seniority": <0-10>,
-    "location": <0-5>
-  },
-  "penalties": [<string>],
-  "why_this_fits": [<string>],
-  "strongest_resume_evidence": [<string>],
-  "gaps": [<string>],
-  "hiring_manager_thesis": "<string>"
-}`;
-
-        const userPrompt = `Score this job posting for fit with the candidate:
-
-TITLE: ${job.title}
-COMPANY: ${job.companies?.name ?? 'Unknown'}
-DEPARTMENT: ${job.department ?? 'N/A'}
-LOCATION: ${job.location_text ?? 'N/A'}
-REMOTE: ${job.remote_status ?? 'N/A'}
-EMPLOYMENT TYPE: ${job.employment_type ?? 'N/A'}
-DESCRIPTION:
-${job.description_text ?? 'No description available.'}`;
+        const userPrompt = [
+          'Score this job posting for fit with the candidate:',
+          '',
+          'TITLE: ' + job.title,
+          'COMPANY: ' + (job.companies?.name ?? 'Unknown'),
+          'DEPARTMENT: ' + (job.department ?? 'N/A'),
+          'LOCATION: ' + (job.location_text ?? 'N/A'),
+          'REMOTE: ' + (job.remote_status ?? 'N/A'),
+          'EMPLOYMENT TYPE: ' + (job.employment_type ?? 'N/A'),
+          'DESCRIPTION:',
+          (jobDescription ?? 'No description available.'),
+        ].join('\n');
 
         const content = await provider.complete(
           [
-            { role: 'system', content: systemPrompt },
+            { role: 'system', content: SYSTEM_PROMPT_TEMPLATE },
             { role: 'user', content: userPrompt },
           ],
           true
         );
 
-        // Parse and validate
         let parsed: unknown;
         try {
           parsed = JSON.parse(content);
@@ -508,12 +643,21 @@ ${job.description_text ?? 'No description available.'}`;
           continue;
         }
 
-        // Store the score
+        // Server-side deterministic score calculation
+        const totalScore = calculateTotalScore(validated.components, validated.penalties);
+        const recommendation = recommendationForScore(totalScore);
+
+        // Force LOW confidence if no description was available
+        const hasDescription = !!jobDescription && jobDescription.trim() !== '';
+        const finalConfidence = (!hasDescription || enrichmentFailed)
+          ? 'LOW'
+          : validated.confidence;
+
         await supabase.from('job_scores').insert({
           job_id: job.id,
-          total_score: validated.score,
-          recommendation: validated.recommendation,
-          confidence: validated.confidence,
+          total_score: totalScore,
+          recommendation,
+          confidence: finalConfidence,
           component_scores_json: validated.components,
           strengths_json: validated.why_this_fits,
           gaps_json: validated.gaps,
@@ -523,7 +667,6 @@ ${job.description_text ?? 'No description available.'}`;
           model_used: provider.modelName,
         });
 
-        // Update job status
         await supabase
           .from('jobs')
           .update({ status: 'scored' })
