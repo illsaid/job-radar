@@ -5,10 +5,10 @@ Run this to establish or restore the production watchlist.
 Uses ON CONFLICT to upsert — safe to run multiple times.
 Disabled test fixtures are included but disabled.
 
-ENABLED (15):
+ENABLED (19 after this seed is applied):
   Tubi, Wrapbook, NBCUniversal, Skydance, Whalar Group, A24, ATTN,
   Spotter, NFL, HeyGen, Runway, ElevenLabs, BuzzFeed, Forbes,
-  Select Management Group
+  Select Management Group, Disney, Paramount, Sony Pictures, Lionsgate
 
 DISABLED TEST FIXTURES (4):
   Stripe, AngelList (Wellfound), Ashby, SmartRecruiters
@@ -32,6 +32,10 @@ VALUES
   ('BuzzFeed',                   'greenhouse',      'buzzfeed',               2, true, 'https://job-boards.greenhouse.io/buzzfeed',                 ARRAY['media','content']),
   ('Forbes',                     'greenhouse',      'forbes',                 2, true, 'https://job-boards.greenhouse.io/forbes',                   ARRAY['media','publishing']),
   ('Select Management Group',    'greenhouse',      'selectmanagementgroup',  2, true, 'https://job-boards.greenhouse.io/selectmanagementgroup',   ARRAY['talent','media']),
+  ('Disney',                     'talentbrew',      'https://jobs.disneycareers.com/search-jobs', 1, true, 'https://jobs.disneycareers.com/search-jobs', ARRAY['media','entertainment']),
+  ('Paramount',                  'successfactors',  'https://careers.paramount.com/go/All-Current-Job-Opportunities/8710000/', 1, true, 'https://careers.paramount.com/go/All-Current-Job-Opportunities/8710000/', ARRAY['media','entertainment']),
+  ('Sony Pictures',              'talentbrew',      'https://www.sonypicturesjobs.com/search-jobs', 1, true, 'https://www.sonypicturesjobs.com/search-jobs', ARRAY['film','media']),
+  ('Lionsgate',                  'successfactors',  'https://jobs.lionsgate.com/go/View-All-Openings/8023300/', 1, true, 'https://jobs.lionsgate.com/go/View-All-Openings/8023300/', ARRAY['film','media']),
 
   -- DISABLED TEST FIXTURES
   ('Stripe',                     'greenhouse',      'stripe',                 1, false, 'https://stripe.com/jobs',                                  ARRAY['fintech','test']),

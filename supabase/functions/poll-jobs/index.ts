@@ -312,11 +312,169 @@ async function fetchSmartRecruiters(company: Company): Promise<NormalizedJob[]> 
   });
 }
 
+// Public career-page adapters. TalentBrew does not expose a documented
+// unauthenticated JSON listing API for the tenant sites in this watchlist. Its
+// server-rendered public listings are the source of record; full descriptions
+// are retrieved from the canonical detail URL after the deterministic prefilter.
+function stripPublicHtml(html: string): string {
+  return html
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#0*39;/gi, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function publicLinks(
+  html: string,
+  pageUrl: string,
+  isJobUrl: (url: string) => boolean,
+  jobId: (url: string) => string | null,
+): Array<{ id: string; title: string; url: string; context: string; innerHtml: string }> {
+  const jobs: Array<{ id: string; title: string; url: string; context: string; innerHtml: string }> = [];
+  const seen = new Set<string>();
+  const anchor = /<a\b[^>]*\bhref=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = anchor.exec(html)) !== null) {
+    const url = new URL(match[1].replace(/&amp;/g, '&'), pageUrl).toString();
+    if (!isJobUrl(url)) continue;
+    const id = jobId(url);
+    const title = stripPublicHtml(/<h[1-6]\b[^>]*>([\s\S]*?)<\/h[1-6]>/i.exec(match[2])?.[1] ?? match[2]);
+    if (!id || !title || seen.has(id)) continue;
+    seen.add(id);
+    jobs.push({ id, title, url, context: stripPublicHtml(html.slice(match.index, match.index + 1800)), innerHtml: match[2] });
+  }
+  return jobs;
+}
+
+async function fetchPublicListings(
+  company: Company,
+  source: string,
+  isJobUrl: (url: string) => boolean,
+  jobId: (url: string) => string | null,
+): Promise<NormalizedJob[]> {
+  const startUrl = company.ats_identifier ?? company.careers_url;
+  if (!startUrl) throw new Error('No public listing URL configured for ' + source);
+  const results: NormalizedJob[] = [];
+  const seenJobs = new Set<string>();
+  const seenPages = new Set<string>();
+  let pageUrl: string | null = startUrl;
+
+  while (pageUrl && seenPages.size < 10 && results.length < MAX_JOBS_PER_COMPANY) {
+    if (seenPages.has(pageUrl)) break;
+    seenPages.add(pageUrl);
+    const response = await fetch(pageUrl, { headers: { Accept: 'text/html' } });
+    if (!response.ok) throw new Error(source + ' public listing ' + response.status + ' for ' + pageUrl);
+    const html = await response.text();
+    for (const link of publicLinks(html, pageUrl, isJobUrl, jobId)) {
+      if (seenJobs.has(link.id)) continue;
+      seenJobs.add(link.id);
+      const cardLocation = /class=["'][^"']*job-location[^"']*["'][^>]*>([\s\S]*?)<\/span>/i.exec(link.innerHtml)?.[1] ?? null;
+      const cardDepartment = /class=["'][^"']*(?:division|department)[^"']*["'][^>]*>([\s\S]*?)<\/span>/i.exec(link.innerHtml)?.[1] ?? null;
+      const cardType = /class=["'][^"']*job-type[^"']*["'][^>]*>([\s\S]*?)<\/span>/i.exec(link.innerHtml)?.[1] ?? null;
+      const location = cardLocation ? stripPublicHtml(cardLocation) : /Location\s*:?\s*([^|]{1,180}?)(?=\s+(?:Department|Job Function|Date|Posted|Employment Type|Job Type)|$)/i.exec(link.context)?.[1]?.trim() ?? null;
+      const department = cardDepartment ? stripPublicHtml(cardDepartment) : /(?:Department|Job Function)\s*:?\s*([^|]{1,180}?)(?=\s+(?:Location|Date|Posted|Employment Type|Job Type)|$)/i.exec(link.context)?.[1]?.trim() ?? null;
+      const employmentType = cardType ? stripPublicHtml(cardType) : /(?:Employment Type|Job Type)\s*:?\s*([^|]{1,100}?)(?=\s+(?:Location|Department|Job Function|Date|Posted)|$)/i.exec(link.context)?.[1]?.trim() ?? null;
+      const lowerLocation = location?.toLowerCase() ?? '';
+      results.push({
+        source,
+        source_job_id: link.id,
+        title: link.title,
+        department,
+        team: null,
+        location_text: location,
+        remote_status: lowerLocation.includes('remote') ? 'Remote' : lowerLocation.includes('hybrid') ? 'Hybrid' : null,
+        employment_type: employmentType,
+        compensation_min: null,
+        compensation_max: null,
+        compensation_currency: 'USD',
+        description_text: null,
+        description_html: null,
+        job_url: link.url,
+        apply_url: link.url,
+        source_published_at: null,
+        source_updated_at: null,
+      });
+      if (results.length >= MAX_JOBS_PER_COMPANY) break;
+    }
+    const next = /<a\b[^>]*\bhref=["']([^"']+)["'][^>]*>\s*(?:<[^>]+>\s*)*(?:next|›|»)/i.exec(html);
+    const nextHref = next?.[1].replace(/&amp;/g, '&') ?? null;
+    pageUrl = nextHref ? new URL(!nextHref.includes('?') && nextHref.includes('&') ? nextHref.replace('&', '?') : nextHref, pageUrl).toString() : null;
+  }
+  return results;
+}
+
+async function fetchTalentBrew(company: Company): Promise<NormalizedJob[]> {
+  return fetchPublicListings(
+    company,
+    'talentbrew',
+    (url) => /\/job\/(?:[^/]+\/){3}\d+\/?$/i.test(new URL(url).pathname),
+    (url) => /\/(\d+)\/?$/.exec(new URL(url).pathname)?.[1] ?? null,
+  );
+}
+
+async function fetchSuccessFactors(company: Company): Promise<NormalizedJob[]> {
+  const careers = company.ats_identifier ?? company.careers_url;
+  const feedUrl = new URL('/sitemap-job.xml', careers).toString();
+  const response = await fetch(feedUrl, { headers: { Accept: 'application/xml, text/xml' } });
+  if (!response.ok) throw new Error('SuccessFactors sitemap ' + response.status + ' for ' + feedUrl);
+  const xml = await response.text();
+  const jobs: NormalizedJob[] = [];
+  const item = /<item>([\s\S]*?)<\/item>/gi;
+  let match: RegExpExecArray | null;
+  const xmlValue = (record: string, tag: string): string | null => {
+    const valueMatch = new RegExp('<' + tag + '[^>]*>([\\s\\S]*?)<\\/' + tag + '>', 'i').exec(record);
+    return valueMatch ? stripPublicHtml(valueMatch[1].replace(/^<!\[CDATA\[/, '').replace(/\]\]>$/, '')) : null;
+  };
+  while ((match = item.exec(xml)) !== null) {
+    const record = match[1];
+    const id = xmlValue(record, '(?:g:)?id') ?? xmlValue(record, 'guid');
+    const titleWithLocation = xmlValue(record, 'title');
+    const jobUrl = xmlValue(record, 'link');
+    if (!id || !titleWithLocation || !jobUrl) continue;
+    const location = xmlValue(record, 'g:location');
+    const descriptionHtml = /<description[^>]*>([\s\S]*?)<\/description>/i.exec(record)?.[1]
+      ?.replace(/^<!\[CDATA\[/, '').replace(/\]\]>$/, '')
+      .replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&amp;/gi, '&').replace(/&quot;/gi, '"') ?? null;
+    const descriptionText = descriptionHtml ? stripPublicHtml(descriptionHtml) : null;
+    const compensation = /\$([\d,]+)(?:\.\d{2})?\s*(?:-|to)\s*\$([\d,]+)(?:\.\d{2})?/i.exec(descriptionText ?? '');
+    const lowerLocation = location?.toLowerCase() ?? '';
+    jobs.push({
+      source: 'successfactors',
+      source_job_id: id,
+      title: titleWithLocation.replace(/\s*\([^)]*\)\s*$/, '').trim(),
+      department: xmlValue(record, 'g:job_function'),
+      team: null,
+      location_text: location,
+      remote_status: lowerLocation.includes('remote') ? 'Remote' : lowerLocation.includes('hybrid') ? 'Hybrid' : null,
+      employment_type: null,
+      compensation_min: compensation ? Number(compensation[1].replace(/,/g, '')) : null,
+      compensation_max: compensation ? Number(compensation[2].replace(/,/g, '')) : null,
+      compensation_currency: 'USD',
+      description_text: descriptionText,
+      description_html: descriptionHtml,
+      job_url: jobUrl,
+      apply_url: jobUrl,
+      source_published_at: null,
+      source_updated_at: null,
+    });
+  }
+  return jobs;
+}
+
 const ADAPTERS: Record<string, (company: Company) => Promise<NormalizedJob[]>> = {
   greenhouse: fetchGreenhouse,
   lever: fetchLever,
   ashby: fetchAshby,
   smartrecruiters: fetchSmartRecruiters,
+  talentbrew: fetchTalentBrew,
+  successfactors: fetchSuccessFactors,
 };
 
 // ---- Bounded concurrency ----

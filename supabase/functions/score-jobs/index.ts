@@ -350,6 +350,22 @@ async function enrichJobDescription(
       return { description_text: null, description_html: null };
     }
 
+    if (source === 'talentbrew' && jobUrl) {
+      const resp = await fetch(jobUrl, { headers: { Accept: 'text/html' } });
+      if (!resp.ok) return { description_text: null, description_html: null };
+      const html = await resp.text();
+      // Every supported public source includes the full posting within main.
+      // Preserve the canonical page HTML for snapshots; the scorer receives only text.
+      const main = /<main\b[^>]*>([\s\S]*?)<\/main>/i.exec(html)?.[1]
+        ?? /<body\b[^>]*>([\s\S]*?)<\/body>/i.exec(html)?.[1]
+        ?? html;
+      const text = stripHtml(main);
+      return {
+        description_text: text.length > 80 ? text : null,
+        description_html: main,
+      };
+    }
+
     // Lever and Ashby already return descriptions in the list endpoint
     return { description_text: null, description_html: null };
   } catch {

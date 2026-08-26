@@ -1,6 +1,6 @@
 # Job Radar
 
-Private single-user job radar for Richard Kuhne. Scans 15 media/entertainment/AI companies for production operations, AI workflow, and creative technology roles. Detects, normalizes, deduplicates, deterministically gates, enriches descriptions, AI-scores, generates application packets, and sends email alerts — all with human review before any application.
+Private single-user job radar for Richard Kuhne. Scans a media/entertainment/AI watchlist for production operations, AI workflow, and creative technology roles. Detects, normalizes, deduplicates, deterministically gates, enriches descriptions, AI-scores, generates application packets, and sends email alerts — all with human review before any application.
 
 **Live dashboard:** https://radar.richardkuhne.com
 
@@ -11,11 +11,13 @@ Private single-user job radar for Richard Kuhne. Scans 15 media/entertainment/AI
 - **Cron:** Cloudflare Worker (every 3 minutes)
 - **AI:** OpenAI API for scoring and packet generation
 
-### ATS Adapters (4)
+### ATS Adapters (6)
 - Greenhouse — list endpoint, description enriched from detail endpoint
 - Lever — list endpoint with full descriptions
 - Ashby — list endpoint with full descriptions
 - SmartRecruiters — list endpoint, description enriched from detail endpoint
+- TalentBrew — public server-rendered listing pages, description enriched from detail endpoint
+- SuccessFactors Recruiting Marketing — public `sitemap-job.xml` feed with canonical URLs and full descriptions
 
 ### Edge Functions (4)
 - `poll-jobs` — fetches jobs from all enabled companies, normalizes, deduplicates, detects material changes, invokes downstream pipeline

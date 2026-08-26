@@ -3,6 +3,8 @@ import { GreenhouseAdapter } from './greenhouse';
 import { LeverAdapter } from './lever';
 import { AshbyAdapter } from './ashby';
 import { SmartRecruitersAdapter } from './smartrecruiters';
+import { TalentBrewAdapter } from './talentbrew';
+import { SuccessFactorsAdapter } from './successfactors';
 
 export type { JobSourceAdapter, NormalizedJob, AdapterFetchOptions } from './types';
 export { computeContentHash, normalizedJobSchema } from './types';
@@ -12,6 +14,8 @@ const adapters: Record<string, JobSourceAdapter> = {
   lever: new LeverAdapter(),
   ashby: new AshbyAdapter(),
   smartrecruiters: new SmartRecruitersAdapter(),
+  talentbrew: new TalentBrewAdapter(),
+  successfactors: new SuccessFactorsAdapter(),
 };
 
 export function getAdapter(atsType: string): JobSourceAdapter | null {

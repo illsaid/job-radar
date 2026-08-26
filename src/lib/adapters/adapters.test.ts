@@ -1,8 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { GreenhouseAdapter } from '@/lib/adapters/greenhouse';
 import { LeverAdapter } from '@/lib/adapters/lever';
 import { AshbyAdapter } from '@/lib/adapters/ashby';
 import { SmartRecruitersAdapter } from '@/lib/adapters/smartrecruiters';
+import { TalentBrewAdapter } from '@/lib/adapters/talentbrew';
+import { SuccessFactorsAdapter } from '@/lib/adapters/successfactors';
 import { computeContentHash, normalizedJobSchema } from '@/lib/adapters/types';
 import {
   GREENHOUSE_FIXTURE,
@@ -123,10 +125,59 @@ describe('SmartRecruiters fixture structure (postings shape)', () => {
 });
 
 describe('adapter instantiation', () => {
-  it('creates all four adapters with correct names', () => {
+  it('creates all supported adapters with correct names', () => {
     expect(new GreenhouseAdapter().name).toBe('greenhouse');
     expect(new LeverAdapter().name).toBe('lever');
     expect(new AshbyAdapter().name).toBe('ashby');
     expect(new SmartRecruitersAdapter().name).toBe('smartrecruiters');
+    expect(new TalentBrewAdapter().name).toBe('talentbrew');
+    expect(new SuccessFactorsAdapter().name).toBe('successfactors');
   });
+});
+
+const originalFetch = globalThis.fetch;
+afterEach(() => { globalThis.fetch = originalFetch; });
+
+describe('public career page adapters', () => {
+  it('normalizes a TalentBrew job page record with its stable public ID', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response(`
+      <a href="/job/culver-city/lead-engineer-identity-management/22978/87651826448">Lead Engineer, Identity Management</a>
+      <div>Location: Culver City, California (Hybrid) Department: Technology &amp; InfoSec</div>
+    `));
+    const jobs = await new TalentBrewAdapter().fetchJobs({
+      atsIdentifier: 'https://www.sonypicturesjobs.com/search-jobs', careersUrl: '',
+    });
+    expect(jobs).toMatchObject([{
+      source: 'talentbrew', source_job_id: '87651826448',
+      title: 'Lead Engineer, Identity Management', department: 'Technology & InfoSec',
+      remote_status: 'Hybrid',
+      job_url: 'https://www.sonypicturesjobs.com/job/culver-city/lead-engineer-identity-management/22978/87651826448',
+    }]);
+  });
+
+  it('normalizes a SuccessFactors job page record and retains the canonical URL', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response(`
+      <rss><channel><item>
+        <title>Sr. Coordinator, International Sales Strategy &amp; Planning (Santa Monica, CA, US, 90404)</title>
+        <description><![CDATA[&lt;p&gt;Support international sales planning.&lt;/p&gt;&lt;p&gt;Compensation: $55,000 - $60,000&lt;/p&gt;]]></description>
+        <link>https://jobs.lionsgate.com/Lionsgate/job/Santa-Monica-Sr_-Coordinator-CA-90404/1390287000/</link>
+        <guid>1390287000</guid><g:job_function>Sales &amp; Distribution</g:job_function><g:location>Santa Monica, CA, US, 90404</g:location>
+      </item></channel></rss>
+    `));
+    const jobs = await new SuccessFactorsAdapter().fetchJobs({
+      atsIdentifier: 'https://jobs.lionsgate.com/go/View-All-Openings/8023300/', careersUrl: '',
+    });
+    expect(jobs).toMatchObject([{
+      source: 'successfactors', source_job_id: '1390287000',
+      title: 'Sr. Coordinator, International Sales Strategy & Planning',
+      location_text: 'Santa Monica, CA, US, 90404', department: 'Sales & Distribution',
+      compensation_min: 55000, compensation_max: 60000, description_text: 'Support international sales planning. Compensation: $55,000 - $60,000',
+      job_url: 'https://jobs.lionsgate.com/Lionsgate/job/Santa-Monica-Sr_-Coordinator-CA-90404/1390287000/',
+    }]);
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      'https://jobs.lionsgate.com/sitemap-job.xml',
+      expect.anything(),
+    );
+  });
+
 });

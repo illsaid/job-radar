@@ -26,15 +26,17 @@ Private single-user Job Radar for Richard Kuhne. Detect → normalize → dedupe
 - Supabase Auth (email/password, single user)
 - 4 Supabase Edge Functions (Deno runtime)
 
-### ATS Adapters (4)
+### ATS Adapters (6)
 1. **Greenhouse** — `src/lib/adapters/greenhouse.ts` — list endpoint, description enriched from detail endpoint
 2. **Lever** — `src/lib/adapters/lever.ts` — list endpoint with full descriptions
 3. **Ashby** — `src/lib/adapters/ashby.ts` — list endpoint with full descriptions
 4. **SmartRecruiters** — `src/lib/adapters/smartrecruiters.ts` — list endpoint, description enriched from detail endpoint
+5. **TalentBrew** — `src/lib/adapters/talentbrew.ts` — public server-rendered listing pages, description enriched from detail endpoint
+6. **SuccessFactors Recruiting Marketing** — `src/lib/adapters/successfactors.ts` — public `sitemap-job.xml` feed with canonical URLs and full descriptions
 
 ### Edge Functions (4)
 1. **poll-jobs** — Cron-triggered. Fetches jobs from all enabled companies, normalizes, deduplicates, detects material changes via source_fingerprint, invokes downstream pipeline. Always runs downstream even with 0 new jobs.
-2. **score-jobs** — Deterministic prefilter, description enrichment for Greenhouse/SmartRecruiters, AI scoring. Model returns components + penalties only; server calculates total_score and recommendation deterministically.
+2. **score-jobs** — Deterministic prefilter, description enrichment for Greenhouse/SmartRecruiters/TalentBrew, AI scoring. Model returns components + penalties only; server calculates total_score and recommendation deterministically.
 3. **generate-packets** — Idempotent packet generation for 75+ jobs. Verdict is deterministic from stored score. One current packet per job (unique index on job_id WHERE is_current). Updates when score or job materially changes.
 4. **send-alerts** — Email alerts for 82+ jobs. Fails CLOSED if ALERTS_ENABLED not set. Version-aware dedupe via (job_id, source_content_hash, alert_type). Cutoff via ALERTS_ACTIVE_AFTER.
 
@@ -44,7 +46,7 @@ cron → poll-jobs → score-jobs → generate-packets → send-alerts
 ```
 
 ### Database Tables
-- `companies` — watchlist (15 enabled, 4 disabled test fixtures)
+- `companies` — watchlist (15 currently enabled; seed adds four verified companies, with 4 disabled test fixtures)
 - `jobs` — normalized job postings
 - `job_scores` — AI scores with component breakdown
 - `job_snapshots` — historical snapshots for change tracking
@@ -133,7 +135,7 @@ cd cloudflare-worker && npx wrangler deploy
 
 ## KNOWN CURRENT STATE
 
-- 15 enabled companies (Tubi, Wrapbook, NBCUniversal, Skydance, Whalar Group, A24, ATTN, Spotter, NFL, HeyGen, Runway, ElevenLabs, BuzzFeed, Forbes, Select Management Group)
+- 15 currently enabled companies (Tubi, Wrapbook, NBCUniversal, Skydance, Whalar Group, A24, ATTN, Spotter, NFL, HeyGen, Runway, ElevenLabs, BuzzFeed, Forbes, Select Management Group). The seed adds Disney, Paramount, Sony Pictures, and Lionsgate after deployment.
 - 4 disabled test fixtures (Stripe, AngelList/Wellfound, Ashby, SmartRecruiters)
 - 448 jobs in calibration corpus
 - Alerts are DISABLED (RESEND_API_KEY, ALERT_RECIPIENT, ALERT_FROM, ALERTS_ENABLED, ALERTS_ACTIVE_AFTER not yet configured)
