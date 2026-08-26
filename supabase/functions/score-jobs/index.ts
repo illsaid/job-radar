@@ -1,4 +1,4 @@
-// Job Radar — AI Scoring Edge Function (v3.1: deterministic scoring + description enrichment)
+// Job Radar — AI Scoring Edge Function (v3.2: deterministic scoring + enrichment + auth)
 // Scores unscored jobs against Richard's candidate profile using a structured
 // 0-100 rubric. Runs a deterministic prefilter first, then calls the AI model
 // only for relevant jobs. The model returns components + penalties only;
@@ -509,6 +509,32 @@ function clamp(n: number, min: number, max: number): number {
 
 // ---- Main handler ----
 
+// ---- Auth: service-role or authenticated user ----
+async function authenticateRequest(
+  req: Request,
+  supabaseUrl: string,
+  supabaseAnonKey: string
+): Promise<{ ok: boolean; status: number; message: string }> {
+  const authHeader = req.headers.get('Authorization') ?? '';
+  const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+
+  if (authHeader.startsWith('Bearer ')) {
+    const token = authHeader.slice(7);
+    if (serviceRoleKey && token === serviceRoleKey) {
+      return { ok: true, status: 200, message: '' };
+    }
+    if (token.split('.').length === 3) {
+      const tempClient = createClient(supabaseUrl, supabaseAnonKey, {
+        auth: { persistSession: false, autoRefreshToken: false },
+      });
+      const { data: { user } } = await tempClient.auth.getUser(token);
+      if (user) return { ok: true, status: 200, message: '' };
+    }
+  }
+
+  return { ok: false, status: 401, message: 'Unauthorized' };
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { status: 200, headers: corsHeaders });
@@ -516,11 +542,20 @@ Deno.serve(async (req: Request) => {
 
   const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
   const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+  const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? '';
 
   if (!supabaseUrl || !serviceRoleKey) {
     return new Response(
       JSON.stringify({ error: 'Missing Supabase configuration' }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    );
+  }
+
+  const auth = await authenticateRequest(req, supabaseUrl, supabaseAnonKey);
+  if (!auth.ok) {
+    return new Response(
+      JSON.stringify({ error: auth.message }),
+      { status: auth.status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
   }
 
@@ -698,3 +733,4 @@ Deno.serve(async (req: Request) => {
     );
   }
 });
+

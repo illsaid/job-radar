@@ -1,11 +1,11 @@
-// Job Radar — Scheduled Polling Edge Function
+// Job Radar — Scheduled Polling Edge Function (v2.1: always-run pipeline + material change)
 // Invoked by external cron (Cloudflare Worker) or by an authenticated dashboard user.
 // Two authentication paths:
 //   1. Cron: Authorization: Bearer <JOB_RADAR_CRON_SECRET>
 //   2. Manual: valid Supabase JWT (authenticated user)
-// Loads enabled companies, fetches jobs via the correct ATS adapter,
-// normalizes, deduplicates, detects changes, updates timestamps, and logs
-// the complete system run. One broken company never terminates the run.
+// After every successful polling pass, invokes downstream pipeline:
+//   poll → score → generate-packets → send-alerts
+// Even when zero new jobs were found, so pending work is always drained.
 
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
 
@@ -30,7 +30,6 @@ function constantTimeEquals(a: string, b: string): boolean {
 }
 
 // ---- Authentication ----
-// Returns { ok: true, mode: 'cron' | 'manual' } or { ok: false, status: number, message: string }
 async function authenticateRequest(
   req: Request,
   supabaseUrl: string,
@@ -39,7 +38,6 @@ async function authenticateRequest(
   const authHeader = req.headers.get('Authorization') ?? '';
   const cronSecret = Deno.env.get('JOB_RADAR_CRON_SECRET');
 
-  // Path 1: Cron secret
   if (cronSecret && authHeader.startsWith('Bearer ')) {
     const token = authHeader.slice(7);
     if (constantTimeEquals(token, cronSecret)) {
@@ -47,18 +45,13 @@ async function authenticateRequest(
     }
   }
 
-  // Path 2: Supabase JWT (authenticated user)
   if (authHeader.startsWith('Bearer ') && !cronSecret) {
-    // If no cron secret is configured, we can't distinguish — reject
     return { ok: false, status: 401, message: 'JOB_RADAR_CRON_SECRET not configured' };
   }
 
-  // Try to validate as a Supabase JWT
   if (authHeader.startsWith('Bearer ')) {
     const token = authHeader.slice(7);
-    // Quick check: JWTs have 3 dot-separated parts
     if (token.split('.').length === 3) {
-      // Validate the JWT by making a lightweight auth call
       const tempClient = createClient(supabaseUrl, supabaseAnonKey, {
         auth: { persistSession: false, autoRefreshToken: false },
       });
@@ -72,7 +65,7 @@ async function authenticateRequest(
   return { ok: false, status: 401, message: 'Unauthorized: valid cron secret or user JWT required' };
 }
 
-// ---- Adapter implementations (inlined, no shared code between edge functions) ----
+// ---- Normalized job interface ----
 
 interface NormalizedJob {
   source: string;
@@ -94,6 +87,32 @@ interface NormalizedJob {
   source_updated_at: string | null;
 }
 
+// Stable listing fingerprint — computed from lightweight listing fields only,
+// NOT from enriched description_text. This prevents false-positive hash
+// mismatches between the initial listing and the later enriched description.
+function computeSourceFingerprint(job: NormalizedJob): string {
+  const fields = [
+    job.source,
+    job.source_job_id,
+    job.title,
+    job.department ?? '',
+    job.location_text ?? '',
+    job.remote_status ?? '',
+    job.employment_type ?? '',
+    job.compensation_min?.toString() ?? '',
+    job.compensation_max?.toString() ?? '',
+    job.job_url ?? '',
+    job.source_published_at ?? '',
+    job.source_updated_at ?? '',
+  ].join('|');
+  let hash = 5381;
+  for (let i = 0; i < fields.length; i++) {
+    hash = ((hash << 5) + hash + fields.charCodeAt(i)) | 0;
+  }
+  return (hash >>> 0).toString(16);
+}
+
+// Full content hash — includes description text for snapshot tracking
 function computeContentHash(job: NormalizedJob): string {
   const fields = [
     job.source,
@@ -120,14 +139,15 @@ interface Company {
   ats_identifier: string | null;
   priority: number;
   enabled: boolean;
+  consecutive_failures: number;
 }
 
 async function fetchGreenhouse(company: Company): Promise<NormalizedJob[]> {
   const board = company.ats_identifier;
   if (!board) throw new Error('No ATS identifier for Greenhouse');
-  const url = `https://boards-api.greenhouse.io/v1/boards/${board}/departments`;
+  const url = 'https://boards-api.greenhouse.io/v1/boards/' + board + '/departments';
   const resp = await fetch(url, { headers: { Accept: 'application/json' } });
-  if (!resp.ok) throw new Error(`Greenhouse ${resp.status} for "${board}"`);
+  if (!resp.ok) throw new Error('Greenhouse ' + resp.status + ' for "' + board + '"');
   const data = await resp.json();
   const allJobs: Array<{ id: number; title: string; absolute_url: string; departmentName: string; location: { name: string } | null; updated_at: string; first_published: string | null; metadata: Array<{ name: string; value: string } | null> | null }> = [];
   for (const dept of data.departments ?? []) {
@@ -165,9 +185,9 @@ async function fetchGreenhouse(company: Company): Promise<NormalizedJob[]> {
 async function fetchLever(company: Company): Promise<NormalizedJob[]> {
   const c = company.ats_identifier;
   if (!c) throw new Error('No ATS identifier for Lever');
-  const url = `https://api.lever.co/v0/postings/${c}?mode=json`;
+  const url = 'https://api.lever.co/v0/postings/' + c + '?mode=json';
   const resp = await fetch(url, { headers: { Accept: 'application/json' } });
-  if (!resp.ok) throw new Error(`Lever ${resp.status} for "${c}"`);
+  if (!resp.ok) throw new Error('Lever ' + resp.status + ' for "' + c + '"');
   const data: unknown = await resp.json();
   const postings: Array<{
     id: string; text: string; descriptionPlain: string | null; description: string | null;
@@ -209,9 +229,9 @@ async function fetchLever(company: Company): Promise<NormalizedJob[]> {
 async function fetchAshby(company: Company): Promise<NormalizedJob[]> {
   const c = company.ats_identifier;
   if (!c) throw new Error('No ATS identifier for Ashby');
-  const url = `https://api.ashbyhq.com/posting-api/job-board/${c}?includeCompensation=true`;
+  const url = 'https://api.ashbyhq.com/posting-api/job-board/' + c + '?includeCompensation=true';
   const resp = await fetch(url, { headers: { Accept: 'application/json' } });
-  if (!resp.ok) throw new Error(`Ashby ${resp.status} for "${c}"`);
+  if (!resp.ok) throw new Error('Ashby ' + resp.status + ' for "' + c + '"');
   const data = await resp.json();
   return (data.jobs ?? []).map((job: {
     title: string; location: string | null; department: string | null; team: string | null;
@@ -257,9 +277,9 @@ async function fetchAshby(company: Company): Promise<NormalizedJob[]> {
 async function fetchSmartRecruiters(company: Company): Promise<NormalizedJob[]> {
   const c = company.ats_identifier;
   if (!c) throw new Error('No ATS identifier for SmartRecruiters');
-  const url = `https://api.smartrecruiters.com/v1/companies/${c}/postings?limit=100`;
+  const url = 'https://api.smartrecruiters.com/v1/companies/' + c + '/postings?limit=100';
   const resp = await fetch(url, { headers: { Accept: 'application/json' } });
-  if (!resp.ok) throw new Error(`SmartRecruiters ${resp.status} for "${c}"`);
+  if (!resp.ok) throw new Error('SmartRecruiters ' + resp.status + ' for "' + c + '"');
   const data = await resp.json();
   return (data.content ?? []).map((job: {
     id: string; name: string; department: { label: string } | null; function: { label: string } | null;
@@ -316,7 +336,45 @@ async function runWithConcurrency<T>(
   await Promise.all(workers);
 }
 
-// ---- Core polling logic (shared by cron and manual trigger) ----
+// ---- Pipeline stage invocation ----
+
+interface PipelineResult {
+  jobsScored: number;
+  alertsSent: number;
+  packetsGenerated: number;
+  stageFailures: Array<{ stage: string; error: string }>;
+}
+
+async function invokePipelineStage(
+  supabaseUrl: string,
+  serviceRoleKey: string,
+  functionName: string
+): Promise<{ ok: boolean; data: Record<string, unknown> | null; error: string | null }> {
+  try {
+    const resp = await fetch(
+      supabaseUrl + '/functions/v1/' + functionName,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer ' + serviceRoleKey,
+        },
+        body: '{}',
+      }
+    );
+    if (resp.ok) {
+      const data = await resp.json();
+      return { ok: true, data: data as Record<string, unknown>, error: null };
+    }
+    const errText = await resp.text();
+    return { ok: false, data: null, error: 'pipeline:' + functionName + ' returned ' + resp.status + ': ' + errText };
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    return { ok: false, data: null, error: 'pipeline:' + functionName + ': ' + errorMsg };
+  }
+}
+
+// ---- Core polling logic ----
 
 interface PollResult {
   runId: string;
@@ -325,6 +383,7 @@ interface PollResult {
   newJobs: number;
   jobsScored: number;
   alertsSent: number;
+  packetsGenerated: number;
   failures: number;
   durationMs: number;
 }
@@ -336,21 +395,19 @@ async function runPoll(supabaseUrl: string, serviceRoleKey: string): Promise<Pol
   });
 
   const runId = crypto.randomUUID();
-  const failures: Array<{ company: string; error: string; timestamp: string }> = [];
+  const failures: Array<{ company?: string; stage?: string; error: string; timestamp: string }> = [];
 
-  // Insert the system run record
   await supabase
     .from('system_runs')
     .insert({ id: runId, started_at: new Date().toISOString() });
 
-  // Load enabled companies
   const { data: companies, error: companyError } = await supabase
     .from('companies')
     .select('*')
     .eq('enabled', true);
 
   if (companyError || !companies) {
-    throw new Error(`Failed to load companies: ${companyError?.message ?? 'no data'}`);
+    throw new Error('Failed to load companies: ' + (companyError?.message ?? 'no data'));
   }
 
   let totalJobsSeen = 0;
@@ -362,7 +419,7 @@ async function runPoll(supabaseUrl: string, serviceRoleKey: string): Promise<Pol
     if (!adapter) {
       failures.push({
         company: company.name,
-        error: `No adapter for ATS type "${company.ats_type}"`,
+        error: 'No adapter for ATS type "' + company.ats_type + '"',
         timestamp: new Date().toISOString(),
       });
       await supabase
@@ -380,17 +437,22 @@ async function runPoll(supabaseUrl: string, serviceRoleKey: string): Promise<Pol
       const jobs = allJobs.slice(0, MAX_JOBS_PER_COMPANY);
       totalJobsSeen += jobs.length;
 
-      // Batch fetch all existing jobs for this company in one query
       const sourceJobIds = jobs.map((j) => j.source_job_id);
       const { data: existingJobs } = await supabase
         .from('jobs')
-        .select('id, source_job_id, content_hash, first_seen_at')
+        .select('id, source_job_id, content_hash, source_fingerprint, first_seen_at, status')
         .eq('company_id', company.id)
         .in('source_job_id', sourceJobIds);
 
-      const existingMap = new Map<string, { id: string; content_hash: string; first_seen_at: string }>();
-      (existingJobs ?? []).forEach((e: { id: string; source_job_id: string; content_hash: string; first_seen_at: string }) => {
-        existingMap.set(e.source_job_id, { id: e.id, content_hash: e.content_hash, first_seen_at: e.first_seen_at });
+      const existingMap = new Map<string, { id: string; content_hash: string; source_fingerprint: string | null; first_seen_at: string; status: string }>();
+      (existingJobs ?? []).forEach((e: { id: string; source_job_id: string; content_hash: string; source_fingerprint: string | null; first_seen_at: string; status: string }) => {
+        existingMap.set(e.source_job_id, {
+          id: e.id,
+          content_hash: e.content_hash,
+          source_fingerprint: e.source_fingerprint,
+          first_seen_at: e.first_seen_at,
+          status: e.status,
+        });
       });
 
       const newJobsToInsert: Record<string, unknown>[] = [];
@@ -401,21 +463,40 @@ async function runPoll(supabaseUrl: string, serviceRoleKey: string): Promise<Pol
       const now = new Date().toISOString();
 
       for (const normalizedJob of jobs) {
+        const sourceFingerprint = computeSourceFingerprint(normalizedJob);
         const contentHash = computeContentHash(normalizedJob);
         const existing = existingMap.get(normalizedJob.source_job_id);
 
         if (existing) {
+          // Existing job — check for material change using source_fingerprint
+          const existingFingerprint = existing.source_fingerprint ?? existing.content_hash;
+          const isMaterialChange = existingFingerprint !== sourceFingerprint;
+
           const updates: Record<string, unknown> = {
             last_seen_at: now,
           };
 
-          if (existing.content_hash !== contentHash) {
+          if (isMaterialChange) {
+            // Material change: update all listing fields, set status to 'new' for reevaluation
+            updates.source_fingerprint = sourceFingerprint;
             updates.content_hash = contentHash;
             updates.description_text = normalizedJob.description_text;
             updates.description_html = normalizedJob.description_html;
             updates.title = normalizedJob.title;
             updates.location_text = normalizedJob.location_text;
+            updates.remote_status = normalizedJob.remote_status;
+            updates.employment_type = normalizedJob.employment_type;
+            updates.department = normalizedJob.department;
+            updates.team = normalizedJob.team;
+            updates.compensation_min = normalizedJob.compensation_min;
+            updates.compensation_max = normalizedJob.compensation_max;
+            updates.source_published_at = normalizedJob.source_published_at;
             updates.source_updated_at = normalizedJob.source_updated_at;
+            updates.job_url = normalizedJob.job_url;
+            updates.apply_url = normalizedJob.apply_url;
+            updates.last_material_change_at = now;
+            updates.status = 'new';
+
             changedSnapshots.push({
               job_id: existing.id,
               content_hash: contentHash,
@@ -425,6 +506,7 @@ async function runPoll(supabaseUrl: string, serviceRoleKey: string): Promise<Pol
 
           updatesToApply.push({ id: existing.id, data: updates });
         } else {
+          // New job
           newJobsToInsert.push({
             company_id: company.id,
             source: normalizedJob.source,
@@ -447,13 +529,14 @@ async function runPoll(supabaseUrl: string, serviceRoleKey: string): Promise<Pol
             first_seen_at: now,
             last_seen_at: now,
             content_hash: contentHash,
+            source_fingerprint: sourceFingerprint,
             status: 'new',
           });
           newCount++;
         }
       }
 
-      // Batch insert new jobs in chunks
+      // Batch insert new jobs
       for (let i = 0; i < newJobsToInsert.length; i += BATCH_INSERT_SIZE) {
         const batch = newJobsToInsert.slice(i, i + BATCH_INSERT_SIZE);
         const { data: inserted, error: insertError } = await supabase
@@ -464,7 +547,7 @@ async function runPoll(supabaseUrl: string, serviceRoleKey: string): Promise<Pol
         if (insertError) {
           failures.push({
             company: company.name,
-            error: `Batch insert failed: ${insertError.message}`,
+            error: 'Batch insert failed: ' + insertError.message,
             timestamp: now,
           });
         } else if (inserted) {
@@ -500,7 +583,6 @@ async function runPoll(supabaseUrl: string, serviceRoleKey: string): Promise<Pol
         await supabase.from('jobs').update(update.data).eq('id', update.id);
       }
 
-      // Update company scan status
       await supabase
         .from('companies')
         .update({
@@ -529,66 +611,33 @@ async function runPoll(supabaseUrl: string, serviceRoleKey: string): Promise<Pol
     }
   });
 
-  // After polling, trigger the scoring + alerting pipeline for new jobs.
+  // ---- Always invoke downstream pipeline (even with 0 new jobs) ----
   let jobsScored = 0;
   let alertsSent = 0;
+  let packetsGenerated = 0;
 
-  if (totalNewJobs > 0) {
-    try {
-      const scoreResponse = await fetch(
-        `${supabaseUrl}/functions/v1/score-jobs`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${serviceRoleKey}`,
-          },
-          body: '{}',
-        }
-      );
-      if (scoreResponse.ok) {
-        const scoreData = await scoreResponse.json();
-        jobsScored = scoreData.scored ?? 0;
-      }
-    } catch {
-      // Scoring failure is non-fatal
-    }
+  // Stage 1: Score pending jobs
+  const scoreResult = await invokePipelineStage(supabaseUrl, serviceRoleKey, 'score-jobs');
+  if (scoreResult.ok && scoreResult.data) {
+    jobsScored = (scoreResult.data.scored as number) ?? 0;
+  } else if (scoreResult.error) {
+    failures.push({ stage: 'pipeline:score-jobs', error: scoreResult.error, timestamp: new Date().toISOString() });
+  }
 
-    try {
-      const alertResponse = await fetch(
-        `${supabaseUrl}/functions/v1/send-alerts`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${serviceRoleKey}`,
-          },
-          body: '{}',
-        }
-      );
-      if (alertResponse.ok) {
-        const alertData = await alertResponse.json();
-        alertsSent = alertData.alertsSent ?? 0;
-      }
-    } catch {
-      // Alert failure is non-fatal
-    }
+  // Stage 2: Generate/update packets
+  const packetResult = await invokePipelineStage(supabaseUrl, serviceRoleKey, 'generate-packets');
+  if (packetResult.ok && packetResult.data) {
+    packetsGenerated = (packetResult.data.packetsGenerated as number) ?? 0;
+  } else if (packetResult.error) {
+    failures.push({ stage: 'pipeline:generate-packets', error: packetResult.error, timestamp: new Date().toISOString() });
+  }
 
-    try {
-      await fetch(
-        `${supabaseUrl}/functions/v1/generate-packets`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${serviceRoleKey}`,
-          },
-          body: '{}',
-        }
-      );
-    } catch {
-      // Packet generation failure is non-fatal
-    }
+  // Stage 3: Send alerts
+  const alertResult = await invokePipelineStage(supabaseUrl, serviceRoleKey, 'send-alerts');
+  if (alertResult.ok && alertResult.data) {
+    alertsSent = (alertResult.data.alertsSent as number) ?? 0;
+  } else if (alertResult.error) {
+    failures.push({ stage: 'pipeline:send-alerts', error: alertResult.error, timestamp: new Date().toISOString() });
   }
 
   // Complete the system run
@@ -614,6 +663,7 @@ async function runPoll(supabaseUrl: string, serviceRoleKey: string): Promise<Pol
     newJobs: totalNewJobs,
     jobsScored,
     alertsSent,
+    packetsGenerated,
     failures: failures.length,
     durationMs,
   };
@@ -637,7 +687,6 @@ Deno.serve(async (req: Request) => {
     );
   }
 
-  // Authenticate the request — cron secret or Supabase JWT
   const auth = await authenticateRequest(req, supabaseUrl, supabaseAnonKey);
   if (!auth.ok) {
     return new Response(
@@ -660,3 +709,4 @@ Deno.serve(async (req: Request) => {
     );
   }
 });
+

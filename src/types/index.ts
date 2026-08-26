@@ -38,6 +38,8 @@ export interface Job {
   first_seen_at: string;
   last_seen_at: string;
   content_hash: string;
+  source_fingerprint: string | null;
+  last_material_change_at: string | null;
   status: string;
   created_at: string;
   updated_at: string;
@@ -62,7 +64,7 @@ export interface JobScore {
   component_scores_json: ComponentScores;
   strengths_json: string[];
   gaps_json: string[];
-  penalties_json: string[];
+  penalties_json: Array<{ reason: string; points: number }>;
   hiring_manager_thesis: string | null;
   model_used: string | null;
   created_at: string;
@@ -73,6 +75,10 @@ export interface ApplicationPacket {
   job_id: string;
   packet_json: Record<string, unknown>;
   packet_markdown: string | null;
+  source_content_hash: string | null;
+  source_score_id: string | null;
+  model_used: string | null;
+  is_current: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -84,6 +90,7 @@ export interface Alert {
   sent_at: string;
   recipient: string;
   unique_key: string;
+  source_content_hash: string | null;
 }
 
 export interface Application {
@@ -104,7 +111,7 @@ export interface SystemRun {
   new_jobs: number;
   jobs_scored: number;
   alerts_sent: number;
-  failures_json: Array<{ company?: string; error: string; timestamp: string }>;
+  failures_json: Array<{ company?: string; stage?: string; error: string; timestamp: string }>;
   duration_ms: number | null;
 }
 

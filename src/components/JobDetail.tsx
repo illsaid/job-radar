@@ -21,6 +21,7 @@ export function JobDetail({ job, onClose }: JobDetailProps) {
         .from('application_packets')
         .select('*')
         .eq('job_id', job.id)
+        .eq('is_current', true)
         .maybeSingle();
 
       if (packetData) setPacket(packetData as ApplicationPacket);
@@ -159,8 +160,8 @@ export function JobDetail({ job, onClose }: JobDetailProps) {
               <div className="panel p-4 space-y-1.5">
                 {score.penalties_json.map((p, i) => (
                   <div key={i} className="text-xs text-slate-300 flex items-start gap-2">
-                    <span className="text-accent-red shrink-0">-</span>
-                    {p}
+                    <span className="text-accent-red shrink-0">-{Math.abs(p.points)}</span>
+                    {p.reason}
                   </div>
                 ))}
               </div>
