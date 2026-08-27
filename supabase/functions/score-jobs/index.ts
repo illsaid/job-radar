@@ -600,6 +600,21 @@ Deno.serve(async (req: Request) => {
 
   try {
     const provider = getModelProvider();
+    if (!provider) {
+      // Leave every queued job in `new` so a later healthy run can apply the
+      // deterministic prefilter, enrich eligible descriptions, and score it.
+      return new Response(
+        JSON.stringify({
+          error: 'Model provider unavailable; queued jobs were left unchanged',
+          code: 'MODEL_PROVIDER_UNAVAILABLE',
+          scored: 0,
+          skipped: 0,
+          errors: 0,
+          totalProcessed: 0,
+        }),
+        { status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
 
     const { data: jobs, error: jobsError } = await supabase
       .from('jobs')
@@ -632,12 +647,6 @@ Deno.serve(async (req: Request) => {
       if (!prefilter.relevant) {
         await supabase.from('jobs').update({ status: 'filtered' }).eq('id', job.id);
         skipped++;
-        continue;
-      }
-
-      if (!provider) {
-        await supabase.from('jobs').update({ status: 'prefiltered' }).eq('id', job.id);
-        scored++;
         continue;
       }
 
