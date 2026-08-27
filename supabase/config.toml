@@ -1,0 +1,11 @@
+[functions.poll-jobs]
+verify_jwt = false
+
+[functions.score-jobs]
+verify_jwt = false
+
+[functions.send-alerts]
+verify_jwt = false
+
+[functions.generate-packets]
+verify_jwt = false

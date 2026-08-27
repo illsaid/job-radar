@@ -1,0 +1,7 @@
+name = "job-radar-cron"
+main = "cron-poll.js"
+compatibility_date = "2024-09-01"
+
+[triggers]
+# Run every 3 minutes
+crons = ["*/3 * * * *"]
