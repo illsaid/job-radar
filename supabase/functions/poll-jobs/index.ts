@@ -674,7 +674,12 @@ async function runPoll(supabaseUrl: string, serviceRoleKey: string): Promise<Pol
 
     try {
       const allJobs = await adapter(company);
-      const jobs = allJobs.slice(0, MAX_JOBS_PER_COMPANY);
+      // Workday's CXS feed can exceed the legacy listing cap. Persist its full
+      // listing so score-jobs applies deterministic prefiltering before any
+      // candidate is discarded or sent for description enrichment/AI scoring.
+      const jobs = company.ats_type === 'workday'
+        ? allJobs
+        : allJobs.slice(0, MAX_JOBS_PER_COMPANY);
       totalJobsSeen += jobs.length;
 
       const sourceJobIds = jobs.map((j) => j.source_job_id);

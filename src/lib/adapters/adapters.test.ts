@@ -183,38 +183,40 @@ describe('public career page adapters', () => {
   });
 
   it('paginates Workday CXS listings in pages of 20 without converting relative postedOn text', async () => {
-    const firstPage = Array.from({ length: 20 }, (_, index) => ({
-      title: index === 0 ? 'Director, International Controllership' : `Role ${index}`,
-      externalPath: `/job/Hyderabad/Role_${index === 0 ? 'R000107736' : `R0001077${index}`}`,
-      locationsText: 'Hyderabad, India',
-      postedOn: 'Posted Today',
-      remoteType: 'Hybrid',
-      bulletFields: [index === 0 ? 'R000107736' : `R0001077${index}`],
-    }));
+    const total = 359;
     globalThis.fetch = vi.fn().mockImplementation((_url, init) => {
       const { offset } = JSON.parse(String(init?.body));
+      const jobPostings = Array.from({ length: Math.min(20, total - offset) }, (_, index) => {
+        const jobIndex = offset + index;
+        const sourceJobId = jobIndex === 0 ? 'R000107736' : `R0001${String(jobIndex).padStart(5, '0')}`;
+        return {
+          title: jobIndex === 0 ? 'Director, International Controllership' : `Role ${jobIndex}`,
+          externalPath: `/job/Hyderabad/Role_${sourceJobId}`,
+          locationsText: 'Hyderabad, India',
+          postedOn: jobIndex === 0 ? 'Posted Today' : 'Posted Yesterday',
+          remoteType: jobIndex === 358 ? 'Remote' : 'Hybrid',
+          bulletFields: [sourceJobId],
+        };
+      });
       return Promise.resolve(new Response(JSON.stringify({
-        total: 21,
-        jobPostings: offset === 0 ? firstPage : [{
-          title: 'Production Operations Lead', externalPath: '/job/Burbank/Production-Operations-Lead_R000107757',
-          locationsText: 'Burbank, California', postedOn: 'Posted Yesterday', remoteType: 'Remote', bulletFields: ['R000107757'],
-        }],
+        total,
+        jobPostings,
       })));
     });
     const jobs = await new WorkdayAdapter().fetchJobs({
       atsIdentifier: 'https://warnerbros.wd5.myworkdayjobs.com/wday/cxs/warnerbros/global',
       careersUrl: 'https://warnerbros.wd5.myworkdayjobs.com/en-US/global',
     });
-    expect(jobs).toHaveLength(21);
+    expect(jobs).toHaveLength(359);
     expect(jobs[0]).toMatchObject({
       source: 'workday', source_job_id: 'R000107736', remote_status: 'Hybrid',
       source_published_at: null,
       job_url: 'https://warnerbros.wd5.myworkdayjobs.com/en-US/global/job/Hyderabad/Role_R000107736',
     });
-    expect(jobs[20]).toMatchObject({ source_job_id: 'R000107757', remote_status: 'Remote' });
-    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    expect(jobs[358]).toMatchObject({ source_job_id: 'R000100358', remote_status: 'Remote' });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(18);
     expect(JSON.parse(String((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body))).toMatchObject({ limit: 20, offset: 0 });
-    expect(JSON.parse(String((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[1][1].body))).toMatchObject({ limit: 20, offset: 20 });
+    expect(JSON.parse(String((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[17][1].body))).toMatchObject({ limit: 20, offset: 340 });
   });
 
   it('retrieves Workday CXS detail only when requested and exposes description metadata', async () => {
