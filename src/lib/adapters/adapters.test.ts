@@ -5,6 +5,7 @@ import { AshbyAdapter } from '@/lib/adapters/ashby';
 import { SmartRecruitersAdapter } from '@/lib/adapters/smartrecruiters';
 import { TalentBrewAdapter } from '@/lib/adapters/talentbrew';
 import { SuccessFactorsAdapter } from '@/lib/adapters/successfactors';
+import { WorkdayAdapter, fetchWorkdayJobDetail } from '@/lib/adapters/workday';
 import { computeContentHash, normalizedJobSchema } from '@/lib/adapters/types';
 import {
   GREENHOUSE_FIXTURE,
@@ -132,6 +133,7 @@ describe('adapter instantiation', () => {
     expect(new SmartRecruitersAdapter().name).toBe('smartrecruiters');
     expect(new TalentBrewAdapter().name).toBe('talentbrew');
     expect(new SuccessFactorsAdapter().name).toBe('successfactors');
+    expect(new WorkdayAdapter().name).toBe('workday');
   });
 });
 
@@ -176,6 +178,63 @@ describe('public career page adapters', () => {
     }]);
     expect(globalThis.fetch).toHaveBeenCalledWith(
       'https://jobs.lionsgate.com/sitemap-job.xml',
+      expect.anything(),
+    );
+  });
+
+  it('paginates Workday CXS listings in pages of 20 without converting relative postedOn text', async () => {
+    const firstPage = Array.from({ length: 20 }, (_, index) => ({
+      title: index === 0 ? 'Director, International Controllership' : `Role ${index}`,
+      externalPath: `/job/Hyderabad/Role_${index === 0 ? 'R000107736' : `R0001077${index}`}`,
+      locationsText: 'Hyderabad, India',
+      postedOn: 'Posted Today',
+      remoteType: 'Hybrid',
+      bulletFields: [index === 0 ? 'R000107736' : `R0001077${index}`],
+    }));
+    globalThis.fetch = vi.fn().mockImplementation((_url, init) => {
+      const { offset } = JSON.parse(String(init?.body));
+      return Promise.resolve(new Response(JSON.stringify({
+        total: 21,
+        jobPostings: offset === 0 ? firstPage : [{
+          title: 'Production Operations Lead', externalPath: '/job/Burbank/Production-Operations-Lead_R000107757',
+          locationsText: 'Burbank, California', postedOn: 'Posted Yesterday', remoteType: 'Remote', bulletFields: ['R000107757'],
+        }],
+      })));
+    });
+    const jobs = await new WorkdayAdapter().fetchJobs({
+      atsIdentifier: 'https://warnerbros.wd5.myworkdayjobs.com/wday/cxs/warnerbros/global',
+      careersUrl: 'https://warnerbros.wd5.myworkdayjobs.com/en-US/global',
+    });
+    expect(jobs).toHaveLength(21);
+    expect(jobs[0]).toMatchObject({
+      source: 'workday', source_job_id: 'R000107736', remote_status: 'Hybrid',
+      source_published_at: null,
+      job_url: 'https://warnerbros.wd5.myworkdayjobs.com/en-US/global/job/Hyderabad/Role_R000107736',
+    });
+    expect(jobs[20]).toMatchObject({ source_job_id: 'R000107757', remote_status: 'Remote' });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body))).toMatchObject({ limit: 20, offset: 0 });
+    expect(JSON.parse(String((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[1][1].body))).toMatchObject({ limit: 20, offset: 20 });
+  });
+
+  it('retrieves Workday CXS detail only when requested and exposes description metadata', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      jobPostingInfo: {
+        jobDescription: '<p>Lead production workflow transformation.</p>',
+        location: 'Burbank, California', remoteType: 'Hybrid', timeType: 'Full time',
+        jobReqId: 'R000107757', externalUrl: 'https://warnerbros.wd5.myworkdayjobs.com/global/job/Burbank/Production-Operations-Lead_R000107757',
+      },
+    })));
+    const detail = await fetchWorkdayJobDetail(
+      'https://warnerbros.wd5.myworkdayjobs.com/wday/cxs/warnerbros/global',
+      'https://warnerbros.wd5.myworkdayjobs.com/en-US/global/job/Burbank/Production-Operations-Lead_R000107757',
+    );
+    expect(detail).toMatchObject({
+      descriptionText: 'Lead production workflow transformation.', employmentType: 'Full time',
+      remoteStatus: 'Hybrid', locationText: 'Burbank, California', sourceJobId: 'R000107757',
+    });
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      'https://warnerbros.wd5.myworkdayjobs.com/wday/cxs/warnerbros/global/job/Burbank/Production-Operations-Lead_R000107757',
       expect.anything(),
     );
   });

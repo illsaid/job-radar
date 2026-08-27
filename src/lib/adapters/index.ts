@@ -5,6 +5,7 @@ import { AshbyAdapter } from './ashby';
 import { SmartRecruitersAdapter } from './smartrecruiters';
 import { TalentBrewAdapter } from './talentbrew';
 import { SuccessFactorsAdapter } from './successfactors';
+import { WorkdayAdapter } from './workday';
 
 export type { JobSourceAdapter, NormalizedJob, AdapterFetchOptions } from './types';
 export { computeContentHash, normalizedJobSchema } from './types';
@@ -16,6 +17,7 @@ const adapters: Record<string, JobSourceAdapter> = {
   smartrecruiters: new SmartRecruitersAdapter(),
   talentbrew: new TalentBrewAdapter(),
   successfactors: new SuccessFactorsAdapter(),
+  workday: new WorkdayAdapter(),
 };
 
 export function getAdapter(atsType: string): JobSourceAdapter | null {

@@ -5,10 +5,11 @@ Run this to establish or restore the production watchlist.
 Uses ON CONFLICT to upsert — safe to run multiple times.
 Disabled test fixtures are included but disabled.
 
-ENABLED (19 after this seed is applied):
+ENABLED (21 after this seed is applied):
   Tubi, Wrapbook, NBCUniversal, Skydance, Whalar Group, A24, ATTN,
   Spotter, NFL, HeyGen, Runway, ElevenLabs, BuzzFeed, Forbes,
-  Select Management Group, Disney, Paramount, Sony Pictures, Lionsgate
+  Select Management Group, Disney, Paramount, Sony Pictures, Lionsgate,
+  Netflix, Warner Bros. Discovery
 
 DISABLED TEST FIXTURES (4):
   Stripe, AngelList (Wellfound), Ashby, SmartRecruiters
@@ -36,6 +37,8 @@ VALUES
   ('Paramount',                  'successfactors',  'https://careers.paramount.com/go/All-Current-Job-Opportunities/8710000/', 1, true, 'https://careers.paramount.com/go/All-Current-Job-Opportunities/8710000/', ARRAY['media','entertainment']),
   ('Sony Pictures',              'talentbrew',      'https://www.sonypicturesjobs.com/search-jobs', 1, true, 'https://www.sonypicturesjobs.com/search-jobs', ARRAY['film','media']),
   ('Lionsgate',                  'successfactors',  'https://jobs.lionsgate.com/go/View-All-Openings/8023300/', 1, true, 'https://jobs.lionsgate.com/go/View-All-Openings/8023300/', ARRAY['film','media']),
+  ('Netflix',                    'workday',         'https://netflix.wd1.myworkdayjobs.com/wday/cxs/netflix/Netflix', 1, true, 'https://netflix.wd1.myworkdayjobs.com/en-US/Netflix', ARRAY['streaming','media']),
+  ('Warner Bros. Discovery',     'workday',         'https://warnerbros.wd5.myworkdayjobs.com/wday/cxs/warnerbros/global', 1, true, 'https://warnerbros.wd5.myworkdayjobs.com/en-US/global', ARRAY['media','entertainment']),
 
   -- DISABLED TEST FIXTURES
   ('Stripe',                     'greenhouse',      'stripe',                 1, false, 'https://stripe.com/jobs',                                  ARRAY['fintech','test']),

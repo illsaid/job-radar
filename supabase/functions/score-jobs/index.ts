@@ -366,6 +366,25 @@ async function enrichJobDescription(
       };
     }
 
+    if (source === 'workday' && atsIdentifier && jobUrl) {
+      const cxs = new URL(atsIdentifier);
+      const cxsPath = cxs.pathname.replace(/\/jobs\/?$/, '').replace(/\/$/, '');
+      if (!/^\/wday\/cxs\/[^/]+\/[^/]+$/i.test(cxsPath)) {
+        return { description_text: null, description_html: null };
+      }
+      const publicPath = new URL(jobUrl).pathname;
+      const jobPath = /\/job\/.+$/i.exec(publicPath)?.[0];
+      if (!jobPath) return { description_text: null, description_html: null };
+      const resp = await fetch(cxs.origin + cxsPath + jobPath, { headers: { Accept: 'application/json' } });
+      if (!resp.ok) return { description_text: null, description_html: null };
+      const data = await resp.json();
+      const description = data.jobPostingInfo?.jobDescription ?? null;
+      return {
+        description_text: description ? stripHtml(description) : null,
+        description_html: description,
+      };
+    }
+
     // Lever and Ashby already return descriptions in the list endpoint
     return { description_text: null, description_html: null };
   } catch {

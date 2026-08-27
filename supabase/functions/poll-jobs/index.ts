@@ -468,6 +468,87 @@ async function fetchSuccessFactors(company: Company): Promise<NormalizedJob[]> {
   return jobs;
 }
 
+// Workday's public CXS API uses a fixed effective page size of 20. Keep the
+// page size literal and advance only by 20 until the first response's total is
+// exhausted (or the provider returns an empty page).
+function workdayCxsBase(company: Company): string {
+  const identifier = company.ats_identifier ?? company.careers_url;
+  const parsed = new URL(identifier);
+  const pathname = parsed.pathname.replace(/\/jobs\/?$/, '').replace(/\/$/, '');
+  if (!/^\/wday\/cxs\/[^/]+\/[^/]+$/i.test(pathname)) {
+    throw new Error('Invalid Workday CXS base URL for ' + company.name);
+  }
+  return parsed.origin + pathname;
+}
+
+function workdaySourceJobId(posting: { bulletFields?: string[] | null; externalPath?: string | null }): string | null {
+  const bulletId = posting.bulletFields?.find((value) => value.trim().length > 0);
+  if (bulletId) return bulletId.trim();
+  return /_([^/_]+)$/.exec(posting.externalPath ?? '')?.[1] ?? null;
+}
+
+function workdayRemoteStatus(value: string | null | undefined): string | null {
+  const normalized = value?.toLowerCase() ?? '';
+  if (normalized.includes('remote')) return 'Remote';
+  if (normalized.includes('hybrid')) return 'Hybrid';
+  if (normalized.includes('on-site') || normalized.includes('onsite')) return 'On-site';
+  return null;
+}
+
+async function fetchWorkday(company: Company): Promise<NormalizedJob[]> {
+  const cxsBase = workdayCxsBase(company);
+  const postings: Array<{
+    title?: string; externalPath?: string; locationsText?: string | null;
+    postedOn?: string | null; remoteType?: string | null; timeType?: string | null;
+    bulletFields?: string[] | null;
+  }> = [];
+  let total: number | null = null;
+  let offset = 0;
+
+  do {
+    const response = await fetch(cxsBase + '/jobs', {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appliedFacets: {}, limit: 20, offset, searchText: '' }),
+    });
+    if (!response.ok) throw new Error('Workday CXS listing ' + response.status + ' for ' + company.name);
+    const page = await response.json() as { total?: number; jobPostings?: typeof postings };
+    if (total === null) total = Number(page.total ?? 0);
+    const jobs = page.jobPostings ?? [];
+    if (jobs.length === 0) break;
+    postings.push(...jobs);
+    offset += 20;
+  } while (offset < total);
+
+  const seen = new Set<string>();
+  return postings.flatMap((posting): NormalizedJob[] => {
+    const sourceJobId = workdaySourceJobId(posting);
+    if (!sourceJobId || !posting.title || !posting.externalPath || seen.has(sourceJobId)) return [];
+    seen.add(sourceJobId);
+    const jobUrl = company.careers_url.replace(/\/$/, '') + '/' + posting.externalPath.replace(/^\//, '');
+    return [{
+      source: 'workday',
+      source_job_id: sourceJobId,
+      title: posting.title,
+      department: null,
+      team: null,
+      location_text: posting.locationsText ?? null,
+      remote_status: workdayRemoteStatus(posting.remoteType),
+      employment_type: posting.timeType ?? null,
+      compensation_min: null,
+      compensation_max: null,
+      compensation_currency: 'USD',
+      description_text: null,
+      description_html: null,
+      job_url: jobUrl,
+      apply_url: jobUrl,
+      // `postedOn` is relative (for example, "Posted Today"); do not invent a date.
+      source_published_at: null,
+      source_updated_at: null,
+    }];
+  });
+}
+
 const ADAPTERS: Record<string, (company: Company) => Promise<NormalizedJob[]>> = {
   greenhouse: fetchGreenhouse,
   lever: fetchLever,
@@ -475,6 +556,7 @@ const ADAPTERS: Record<string, (company: Company) => Promise<NormalizedJob[]>> =
   smartrecruiters: fetchSmartRecruiters,
   talentbrew: fetchTalentBrew,
   successfactors: fetchSuccessFactors,
+  workday: fetchWorkday,
 };
 
 // ---- Bounded concurrency ----
