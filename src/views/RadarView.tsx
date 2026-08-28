@@ -15,6 +15,7 @@ export function RadarView({ onOpenJob }: RadarViewProps) {
   const [filteredCount, setFilteredCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
   const loadData = useCallback(async () => {
     // Fetch jobs that are NOT filtered — only new + scored (candidate-relevant)
@@ -30,6 +31,8 @@ export function RadarView({ onOpenJob }: RadarViewProps) {
       setLoading(false);
       return;
     }
+
+    setError(null);
 
     // Get count of filtered jobs for the secondary counter
     const { count: fCount } = await supabase
@@ -74,11 +77,15 @@ export function RadarView({ onOpenJob }: RadarViewProps) {
 
     setJobs(enriched);
     setCompanies(companyMap);
+    setLastUpdated(new Date());
     setLoading(false);
   }, []);
 
   useEffect(() => {
     loadData();
+
+    const refreshInterval = window.setInterval(loadData, 60_000);
+    return () => window.clearInterval(refreshInterval);
   }, [loadData]);
 
   const updateApplicationStatus = async (jobId: string, status: string) => {
@@ -134,6 +141,11 @@ export function RadarView({ onOpenJob }: RadarViewProps) {
           <p className="text-2xs text-slate-500 mono uppercase tracking-wider mt-0.5">
             {jobs.length} relevant · {filteredCount} filtered · latest first
           </p>
+          {lastUpdated && (
+            <p className="text-2xs text-slate-600 mono uppercase tracking-wider mt-0.5">
+              Last updated {lastUpdated.toLocaleTimeString()}
+            </p>
+          )}
         </div>
       </div>
 
